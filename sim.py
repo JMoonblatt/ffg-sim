@@ -1,5 +1,5 @@
-import json, random, math, statistics
-from dataclasses import dataclass, field
+import json, random, math
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 # ----------------------------
@@ -72,7 +72,6 @@ class Task:
 class Fork:
     task_id: int
     remaining: int
-    # In v0, a fork is just a temporary parallel attempt; we don't model branch content deeply.
     contenders: Tuple[str, str]  # ("A","B")
 
 @dataclass
@@ -118,7 +117,6 @@ class Simulator:
         types = []
         for k, p in mix.items():
             types += [k] * int(round(p * n))
-        # adjust to exact n
         while len(types) < n:
             types.append("neutral")
         while len(types) > n:
@@ -131,13 +129,24 @@ class Simulator:
             availability = clamp(self.rng.gauss(0.75, 0.15), 0.2, 0.98)
             visibility_bias = clamp(self.rng.gauss(0.5, 0.25), 0.0, 1.0)
             agents.append(Agent(i, types[i], competence, availability, visibility_bias))
+
+        # Optionally inject a toxic hero archetype (high competence, high visibility, selfish, high availability).
+        if self.cfg.get("enable_toxic_hero", False) and agents:
+            idx = self.rng.randrange(len(agents))
+            agents[idx] = Agent(
+                id=agents[idx].id,
+                motivation="selfish",
+                competence=self.cfg.get("toxic_hero_competence", 0.92),
+                availability=self.cfg.get("toxic_hero_availability", 0.92),
+                visibility_bias=self.cfg.get("toxic_hero_visibility", 0.98),
+            )
+
         return agents
 
     def _alive_agents(self) -> List[Agent]:
         return [a for a in self.agents if a.active]
 
     def _choose_visible_agent(self):
-        # visible = high visibility_bias + competence
         alive = self._alive_agents()
         if not alive:
             self.visible_agent_id = None
@@ -146,12 +155,20 @@ class Simulator:
         scores.sort(reverse=True)
         self.visible_agent_id = scores[0][1]
 
-    def _shock_remove_top(self):
+    def _fatigue_multiplier(self, a: Agent) -> float:
+        # If toxic hero enabled and this agent matches the archetype, reduce fatigue accumulation.
+        if self.cfg.get("enable_toxic_hero", False):
+            if a.motivation == "selfish" and a.competence >= 0.9 and a.visibility_bias >= 0.9:
+                return self.cfg.get("toxic_hero_burnout_resistance", 0.55)
+        return 1.0
+
+    def _shock_remove_top(self, k: int = 1):
         alive = self._alive_agents()
         if not alive:
             return
-        top = max(alive, key=lambda a: a.competence)
-        top.active = False
+        topk = sorted(alive, key=lambda a: a.competence, reverse=True)[:k]
+        for a in topk:
+            a.active = False
 
     def _shock_attack_visible(self):
         if self.visible_agent_id is None:
@@ -159,6 +176,27 @@ class Simulator:
         a = self.agents[self.visible_agent_id]
         if a.active:
             a.availability = clamp(a.availability * self.cfg["attack_availability_multiplier"], 0.05, 0.98)
+
+    def _random_dropout(self, count: int):
+        alive = self._alive_agents()
+        if len(alive) <= count:
+            return
+        weights = []
+        ids = []
+        for a in alive:
+            w = 1.0
+            if a.motivation == "selfish":
+                w = 1.25
+            elif a.motivation == "prosocial":
+                w = 0.9
+            ids.append(a.id)
+            weights.append(w)
+        for _ in range(count):
+            pick_id = weighted_choice(ids, weights, self.rng)
+            self.agents[pick_id].active = False
+            j = ids.index(pick_id)
+            ids.pop(j)
+            weights.pop(j)
 
     def _spawn_task(self) -> Optional[Task]:
         if self.rng.random() > self.cfg["task_rate"]:
@@ -183,58 +221,43 @@ class Simulator:
     def _hero_select_team(self, task: Task, pool: List[Agent]) -> List[Agent]:
         if len(pool) < task.coordination:
             return []
-        # deference weights: competence + visibility, skewed
-        strength = self.cfg["hero_deference_strength"]
         scores = []
         for a in pool:
-            # visibility makes them more likely to be chosen / deferred to
             s = (0.75 * a.competence + 0.25 * a.visibility_bias)
             scores.append((s, a))
         scores.sort(reverse=True, key=lambda x: x[0])
 
-        # choose a "hero" then pick others by competence
         hero = scores[0][1]
         team = [hero] + [a for _, a in scores[1:task.coordination]]
         return team
 
     def _ffg_select_team(self, task: Task, pool: List[Agent], steward_id: int) -> Tuple[List[Agent], float, bool]:
-        """
-        Returns (team, latency_proxy, forked)
-        """
         if len(pool) < task.coordination:
             return ([], 0.0, False)
 
-        # Overhead scales with ambiguity (more debate, more logging)
         overhead = self.cfg["ffg_overhead_base"] + self.cfg["ffg_overhead_ambiguity_scale"] * task.ambiguity
         latency_proxy = overhead * task.coordination
 
-        # Disagreement probability rises with ambiguity and motivation mix.
-        # We model it as: probability someone objects strongly enough to fork.
-        # selfish agents object more to personal cost; prosocial object more to group harm.
         base_disagree = task.ambiguity * 0.6
-        # sample a small "committee" preference spread
         committee = self.rng.sample(pool, k=min(task.coordination + 2, len(pool)))
         preference_spread = 0.0
         for a in committee:
             w_group, w_cost, w_ov = a.utility_weights()
-            # crude "stance": prefers payoff vs overhead & personal load
             stance = w_group * task.payoff - w_ov * overhead - w_cost * (task.coordination * 0.08)
             preference_spread += stance
         preference_spread /= max(1, len(committee))
 
-        # Lower spread (near zero) = more contention
         contention = 1.0 - clamp(abs(preference_spread) / 5.0, 0.0, 1.0)
         p_fork = clamp(base_disagree * contention, 0.0, 1.0)
 
         forked = (p_fork > self.cfg["fork_threshold"])
-        # Team selection under FFG: steward is included if available; otherwise best-fit by competence
+
         pool_ids = [a.id for a in pool]
         if steward_id in pool_ids:
             steward = self.agents[steward_id]
         else:
             steward = max(pool, key=lambda a: a.competence)
 
-        # pick remaining by competence but avoid always selecting same top person by adding fatigue penalty
         scored = []
         for a in pool:
             fatigue_pen = a.fatigue * 0.35
@@ -260,20 +283,18 @@ class Simulator:
             if not team:
                 self.failed += 1
                 return
-            # Success probability increases with total competence; ambiguity hurts; hero bottleneck adds fatigue.
+
             total_comp = sum(a.competence for a in team)
             p_success = clamp((total_comp / task.coordination) * 0.95 - task.ambiguity * 0.25, 0.05, 0.98)
 
-            hero = team[0]
-            # hero takes disproportionate load
-            hero_load = 1.0
-            other_load = 0.35
+            hero_load = self.cfg.get("hero_hero_load", 1.0)
+            other_load = self.cfg.get("hero_other_load", 0.35)
+
             for i, a in enumerate(team):
                 load = hero_load if i == 0 else other_load
                 a.responsibility_load += load
-                a.fatigue += load * self.cfg["burnout_load_scale"]
+                a.fatigue += (load * self.cfg["burnout_load_scale"]) * self._fatigue_multiplier(a)
 
-            # latency proxy lower
             self.latency_samples.append(0.15 * task.coordination)
 
             if self.rng.random() < p_success:
@@ -289,19 +310,19 @@ class Simulator:
                 self.failed += 1
                 return
 
-            # If forked, create a fork trial; you still attempt one path now with slightly reduced success (split attention),
-            # then the fork resolves later.
             split_penalty = 0.12 if forked else 0.0
 
             total_comp = sum(a.competence for a in team)
             p_success = clamp((total_comp / task.coordination) * 0.90 - task.ambiguity * 0.18 - split_penalty, 0.05, 0.98)
 
-            # load more evenly distributed, steward slightly higher but bounded
             steward = team[0]
-            for i, a in enumerate(team):
-                load = 0.55 if a.id == steward.id else 0.45
+            steward_load = self.cfg.get("ffg_steward_load", 0.55)
+            member_load = self.cfg.get("ffg_member_load", 0.45)
+
+            for a in team:
+                load = steward_load if a.id == steward.id else member_load
                 a.responsibility_load += load
-                a.fatigue += load * self.cfg["burnout_load_scale"]
+                a.fatigue += (load * self.cfg["burnout_load_scale"]) * self._fatigue_multiplier(a)
 
             if forked:
                 self.forks.append(Fork(task_id=task.id, remaining=self.cfg["fork_trial_length"], contenders=("A", "B")))
@@ -312,15 +333,12 @@ class Simulator:
                 self.failed += 1
 
     def _resolve_forks(self):
-        # Simple model: forks consume attention for a while; when they resolve, you recover some benefit (extra completions)
-        # but not always. This is intentionally conservative.
         kept = []
         for f in self.forks:
             f.remaining -= 1
             if f.remaining <= 0:
-                # merge success chance depends on current ambiguity climate; we approximate with a constant
-                if self.rng.random() < 0.65:
-                    self.completed += 1  # merged improvement
+                if self.rng.random() < self.cfg.get("merge_success_prob", 0.65):
+                    self.completed += 1
                 else:
                     self.failed += 1
             else:
@@ -337,10 +355,8 @@ class Simulator:
         return exits
 
     def run(self, regime: str) -> SimResult:
-        # choose visible at start
         self._choose_visible_agent()
 
-        # rotate steward schedule = simple round-robin over agent IDs
         steward_cycle = list(range(len(self.agents)))
         steward_idx = 0
 
@@ -355,11 +371,17 @@ class Simulator:
             steps_survived += 1
 
             if t == self.cfg["shock_remove_top_agent_step"]:
-                self._shock_remove_top()
+                self._shock_remove_top(k=self.cfg.get("shock_remove_top_k", 1))
+
             if t == self.cfg["shock_attack_visible_agent_step"]:
                 self._shock_attack_visible()
 
-            # refresh visible agent if previous is gone
+            if t == self.cfg.get("shock_attack_visible_agent_step_2", -1):
+                self._shock_attack_visible()
+
+            if t == self.cfg.get("random_dropout_step", -1):
+                self._random_dropout(self.cfg.get("random_dropout_count", 1))
+
             if self.visible_agent_id is None or not self.agents[self.visible_agent_id].active:
                 self._choose_visible_agent()
 
@@ -378,7 +400,7 @@ class Simulator:
             total_exits += self._apply_exits()
 
         loads = [a.responsibility_load for a in self.agents]
-        res = SimResult(
+        return SimResult(
             completed=self.completed,
             attempted=self.attempted,
             failed=self.failed,
@@ -387,45 +409,64 @@ class Simulator:
             responsibility_gini=gini(loads),
             steps_survived=steps_survived,
         )
-        return res
 
 def run_ab(cfg: Dict):
-    # Run HERO
     simA = Simulator(cfg)
     resA = simA.run(Regime.HERO)
 
-    # Run FFG
     simB = Simulator(cfg)
     resB = simB.run(Regime.FFG)
 
     return resA, resB
 
-def print_result(name: str, r: SimResult):
-    attempted = max(1, r.attempted)
-    print(f"\n=== {name} ===")
-    print(f"steps_survived       : {r.steps_survived}")
-    print(f"attempted            : {r.attempted}")
-    print(f"completed            : {r.completed}")
-    print(f"failed               : {r.failed}")
-    print(f"completion_rate      : {r.completed/attempted:.3f}")
-    print(f"exits (burnout)      : {r.exits}")
-    print(f"avg_latency_proxy    : {r.avg_latency_proxy:.3f}")
-    print(f"responsibility_gini  : {r.responsibility_gini:.3f}")
+def summarize(results: List[SimResult]) -> Dict[str, float]:
+    def mean(attr):
+        vals = [getattr(r, attr) for r in results]
+        return sum(vals) / max(1, len(vals))
+
+    completion_rate = sum(r.completed for r in results) / max(1, sum(r.attempted for r in results))
+
+    return {
+        "steps_survived": mean("steps_survived"),
+        "completion_rate": completion_rate,
+        "exits": mean("exits"),
+        "avg_latency_proxy": mean("avg_latency_proxy"),
+        "responsibility_gini": mean("responsibility_gini"),
+    }
 
 if __name__ == "__main__":
     with open("config.json", "r") as f:
         cfg = json.load(f)
 
-    resA, resB = run_ab(cfg)
-    print_result("HERO", resA)
-    print_result("FFG", resB)
+    seeds = cfg.get("sweep_seeds", [cfg.get("seed", 7)])
 
-    # A crude "win" report that matches our stated objective: resilience and load diffusion.
-    print("\n=== Quick comparison (interpretation) ===")
-print("Prefer: higher steps_survived, lower responsibility_gini, fewer exits.")
-print("Completion rate matters, but not at the expense of collapse risk.")
-print("d_steps_survived      :", resB.steps_survived - resA.steps_survived)
-print("d_responsibility_gini :", round(resB.responsibility_gini - resA.responsibility_gini, 3))
-print("d_exits               :", resB.exits - resA.exits)
-print("d_completion_rate     :", round((resB.completed/max(1,resB.attempted)) - (resA.completed/max(1,resA.attempted)), 3))
+    hero_runs: List[SimResult] = []
+    ffg_runs: List[SimResult] = []
 
+    for s in seeds:
+        cfg_run = dict(cfg)
+        cfg_run["seed"] = s
+        resA, resB = run_ab(cfg_run)
+        hero_runs.append(resA)
+        ffg_runs.append(resB)
+
+    H = summarize(hero_runs)
+    F = summarize(ffg_runs)
+
+    print("\n=== SWEEP SUMMARY ===")
+    print("seeds:", len(seeds))
+
+    print("\nHERO:")
+    for k, v in H.items():
+        print(f"  {k:18s} {v:.3f}")
+
+    print("\nFFG:")
+    for k, v in F.items():
+        print(f"  {k:18s} {v:.3f}")
+
+    print("\nDIFF (FFG - HERO):")
+    print("  d_steps_survived      :", round(F["steps_survived"] - H["steps_survived"], 3))
+    print("  d_completion_rate     :", round(F["completion_rate"] - H["completion_rate"], 3))
+    print("  d_exits               :", round(F["exits"] - H["exits"], 3))
+    print("  d_avg_latency_proxy   :", round(F["avg_latency_proxy"] - H["avg_latency_proxy"], 3))
+    print("  d_responsibility_gini :", round(F["responsibility_gini"] - H["responsibility_gini"], 3))
