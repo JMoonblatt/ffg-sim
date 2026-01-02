@@ -1,25 +1,29 @@
 {
-  "seed": 7,
-  "steps": 500,
-  "n_agents": 20,
+  "sweep_seeds": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20],
 
-  "motivation_mix": {"selfish": 0.35, "neutral": 0.45, "prosocial": 0.20},
-
-  "task_rate": 0.35,
-  "task_complexity_range": [1, 10],
-  "task_coordination_range": [1, 6],
-  "task_ambiguity_range": [0.0, 1.0],
-
+  "shock_remove_top_k": 2,
   "shock_remove_top_agent_step": 200,
+
   "shock_attack_visible_agent_step": 300,
+  "shock_attack_visible_agent_step_2": 360,
   "attack_availability_multiplier": 0.5,
 
-  "hero_deference_strength": 2.0,
-  "ffg_overhead_base": 0.12,
-  "ffg_overhead_ambiguity_scale": 0.20,
-  "fork_threshold": 0.25,
-  "fork_trial_length": 12,
+  "random_dropout_step": 420,
+  "random_dropout_count": 2,
 
-  "burnout_load_scale": 0.035,
-  "exit_fatigue_threshold": 1.0
+  "enable_toxic_hero": true,
+  "toxic_hero_competence": 0.92,
+  "toxic_hero_availability": 0.92,
+  "toxic_hero_visibility": 0.98,
+  "toxic_hero_burnout_resistance": 0.55,
+
+  "hero_hero_load": 1.0,
+  "hero_other_load": 0.35,
+
+  "ffg_steward_load": 0.55,
+  "ffg_member_load": 0.45,
+
+  "merge_success_prob": 0.65,
+
+  "print_unicode_safe": true
 }
