@@ -1,0 +1,25 @@
+{
+  "seed": 7,
+  "steps": 500,
+  "n_agents": 20,
+
+  "motivation_mix": {"selfish": 0.35, "neutral": 0.45, "prosocial": 0.20},
+
+  "task_rate": 0.35,
+  "task_complexity_range": [1, 10],
+  "task_coordination_range": [1, 6],
+  "task_ambiguity_range": [0.0, 1.0],
+
+  "shock_remove_top_agent_step": 200,
+  "shock_attack_visible_agent_step": 300,
+  "attack_availability_multiplier": 0.5,
+
+  "hero_deference_strength": 2.0,
+  "ffg_overhead_base": 0.12,
+  "ffg_overhead_ambiguity_scale": 0.20,
+  "fork_threshold": 0.25,
+  "fork_trial_length": 12,
+
+  "burnout_load_scale": 0.035,
+  "exit_fatigue_threshold": 1.0
+}
