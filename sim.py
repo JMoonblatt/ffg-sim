@@ -422,9 +422,10 @@ if __name__ == "__main__":
 
     # A crude "win" report that matches our stated objective: resilience and load diffusion.
     print("\n=== Quick comparison (interpretation) ===")
-    print("Higher steps_survived and lower responsibility_gini are strongly preferred.")
-    print("Lower exits is preferred. Completion rate matters, but not at the expense of collapse risk.")
-    print(f"Δ steps_survived      : {resB.steps_survived - resA.steps_survived}")
-    print(f"Δ responsibility_gini : {resB.responsibility_gini - resA.responsibility_gini:+.3f}")
-    print(f"Δ exits               : {resB.exits - resA.exits:+d}")
-    print(f"Δ completion_rate     : {(resB.completed/max(1,resB.attempted)) - (resA.completed/max(1,resA.attempted)):+.3f}")
+print("Prefer: higher steps_survived, lower responsibility_gini, fewer exits.")
+print("Completion rate matters, but not at the expense of collapse risk.")
+print("d_steps_survived      :", resB.steps_survived - resA.steps_survived)
+print("d_responsibility_gini :", round(resB.responsibility_gini - resA.responsibility_gini, 3))
+print("d_exits               :", resB.exits - resA.exits)
+print("d_completion_rate     :", round((resB.completed/max(1,resB.attempted)) - (resA.completed/max(1,resA.attempted)), 3))
+
